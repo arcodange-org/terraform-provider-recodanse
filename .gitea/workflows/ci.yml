@@ -1,0 +1,78 @@
+name: CI
+
+# ⚠ AUCUNE ancre YAML (`&` / `*`) : le parseur d'événements de Gitea Actions ne
+# les résout pas, et AUCUN run ne se déclenche plus, en silence.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go (vet, tests, -race si le noyau le permet, lint si présent)
+    # Un module Go sans base ni navigateur : les runners partagés suffisent.
+    runs-on: ubuntu-latest
+    container: golang:1.26
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          HOTE="${GITHUB_SERVER_URL#*://}"
+          BRANCHE="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          git clone --depth 1 --branch "$BRANCHE" \
+            "http://x-access-token:${TOKEN}@${HOTE}/${GITHUB_REPOSITORY}.git" .
+
+      - name: Format
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "gofmt : fichiers à formater ci-dessus"; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      # ⚠ -race dépend du NOYAU du runner : sous Docker Desktop (arm64), l'espace
+      # d'adresses fait 47 bits et ThreadSanitizer meurt avant le premier test
+      # (« unsupported VMA range ... Found 47 - Supported 48 ») — un
+      # rouge qui ne parle pas du code. On SONDE le détecteur sur un programme vide :
+      # s'il tient, tout joue sous -race ; sinon tout joue SANS, et le pas le DIT.
+      # Un rouge d'un test reste un rouge dans les deux cas.
+      - name: Tests (sous -race si le noyau le permet)
+        shell: bash
+        run: |
+          mkdir -p /tmp/sonde && printf 'package main\nfunc main() {}\n' > /tmp/sonde/main.go
+          if (cd /tmp/sonde && go mod init sonde >/dev/null 2>&1 && go run -race . ) > /tmp/sonde.log 2>&1; then
+            go test -race -count=1 ./...
+          else
+            echo "::warning::-race INDISPONIBLE sur ce runner (ThreadSanitizer) : tests SANS -race. Sonde :"
+            cat /tmp/sonde.log
+            go test -count=1 ./...
+          fi
+
+      # ⚠ DEUX SAUTS DÉCLARÉS (README, « Ce que les essais prouvent ») : l'essai à
+      # vrais binaires (ni Terraform, ni OpenTofu, ni Hydra ici) et l'essai contre
+      # la QA déployée. Ce pas les JOUE et imprime leur raison : un saut se lit au
+      # journal, il ne se tait pas. S'ils cessaient de se sauter ici, c'est qu'une
+      # variable a fui dans la CI — le pas rougit.
+      - name: Sauts déclarés (essais d'acceptation)
+        shell: bash # pipefail : un rouge de go test ne se perd pas dans le tee
+        run: |
+          go test -count=1 -v -run 'TestLeFournisseur' . | tee /tmp/sauts.log
+          test "$(grep -c -- '--- SKIP' /tmp/sauts.log)" = 2 || { echo "attendu : DEUX sauts déclarés"; exit 1; }
+
+      - name: golangci-lint (si présent dans l'image)
+        run: |
+          if command -v golangci-lint >/dev/null 2>&1; then
+            golangci-lint run ./...
+          else
+            echo "golangci-lint absent de l'image golang:1.26 : SAUTÉ (déclaré). go vet et gofmt ont joué."
+          fi
+
+      - name: Construire le fournisseur et la CLI
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o /tmp/terraform-provider-recodanse .
+          CGO_ENABLED=0 go build -trimpath -o /tmp/recodanse-connexion ./cmd/recodanse-connexion
+          /tmp/recodanse-connexion version

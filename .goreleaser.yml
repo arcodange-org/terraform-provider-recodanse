@@ -1,0 +1,78 @@
+# .goreleaser.yml — joué par .github/workflows/release.yml à chaque tag vX.Y.Z.
+#
+# La forme qu'attendent les registres Terraform et OpenTofu :
+# une archive zip par plateforme nommée
+# `terraform-provider-recodanse_<version>_<os>_<arch>.zip`, le manifeste, et
+# `SHA256SUMS` signé par GPG (`GPG_FINGERPRINT`, posé par l'import de la clé).
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: fournisseur
+    main: .
+    binary: '{{ .ProjectName }}_v{{ .Version }}'
+    env:
+      - CGO_ENABLED=0
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    flags:
+      - -trimpath
+    ldflags:
+      - '-s -w -X main.version={{ .Version }}'
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64]
+  - id: recodanse-connexion
+    main: ./cmd/recodanse-connexion
+    binary: recodanse-connexion
+    env:
+      - CGO_ENABLED=0
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    flags:
+      - -trimpath
+    ldflags:
+      - '-s -w -X main.version={{ .Version }}'
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: fournisseur
+    ids: [fournisseur]
+    formats: [zip]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+  - id: recodanse-connexion
+    ids: [recodanse-connexion]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: 'recodanse-connexion_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  extra_files:
+    - glob: 'terraform-registry-manifest.json'
+      name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
+  name_template: '{{ .ProjectName }}_{{ .Version }}_SHA256SUMS'
+  algorithm: sha256
+
+signs:
+  - artifacts: checksum
+    args:
+      - '--batch'
+      - '--local-user'
+      - '{{ .Env.GPG_FINGERPRINT }}'
+      - '--output'
+      - '${signature}'
+      - '--detach-sign'
+      - '${artifact}'
+
+release:
+  extra_files:
+    - glob: 'terraform-registry-manifest.json'
+      name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
+  # Publiée d'emblée : le registre Terraform ne lit pas une release brouillon.
+  draft: false
+
+changelog:
+  disable: true
